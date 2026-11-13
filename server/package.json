@@ -1,0 +1,16 @@
+{
+  "name": "dinthi-ai-server",
+  "version": "1.0.0",
+  "description": "Production-ready secure backend for Dinthi AI (Gemini AI proxy, outbound telephony orchestration, and Twilio webhooks)",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test telephony.test.js server.test.js"
+  },
+  "keywords": ["ai", "gemini", "telephony", "twilio", "webhooks", "proxy"],
+  "author": "Dinthi AI",
+  "license": "Apache-2.0"
+}

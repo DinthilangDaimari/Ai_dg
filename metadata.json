@@ -1,0 +1,8 @@
+{
+  "name": "Dinthi AI",
+  "description": "Original AI Call-Assistant and Call-Screening app powered by Gemini. Intercepts incoming calls, provides live dual-speaker transcription, generates post-call summaries, and blocks spam without client secrets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
