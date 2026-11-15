@@ -330,3 +330,63 @@ test('Twilio webhook validation enforces X-Twilio-Signature and AccountSid in pr
     }
   }
 });
+
+test('Direct APK download endpoints serve Dinthi-AI.apk with proper headers, Range support, and metadata', async () => {
+  const { server, baseUrl } = await startTestServer();
+  try {
+    // 1. Metadata endpoint with GitHub Pages CORS
+    const infoRes = await fetch(`${baseUrl}/api/app/apk-info`, {
+      headers: { Origin: 'https://dinthilangdaimari.github.io' }
+    });
+    assert.equal(infoRes.status, 200);
+    assert.equal(
+      infoRes.headers.get('access-control-allow-origin'),
+      'https://dinthilangdaimari.github.io'
+    );
+    const info = await infoRes.json();
+    assert.equal(info.available, true);
+    assert.equal(info.filename, 'Dinthi-AI.apk');
+    assert.equal(info.mimeType, 'application/vnd.android.package-archive');
+    assert.ok(info.sizeBytes > 1000);
+    assert.match(info.sha256, /^[a-f0-9]{64}$/);
+
+    // 2. HEAD /download/dinthi-ai.apk
+    const headRes = await fetch(`${baseUrl}/download/dinthi-ai.apk`, { method: 'HEAD' });
+    assert.equal(headRes.status, 200);
+    assert.equal(headRes.headers.get('content-type'), 'application/vnd.android.package-archive');
+    assert.equal(headRes.headers.get('content-disposition'), 'attachment; filename="Dinthi-AI.apk"');
+    assert.equal(headRes.headers.get('accept-ranges'), 'bytes');
+    assert.equal(Number(headRes.headers.get('content-length')), info.sizeBytes);
+
+    // 3. Range GET (first 4 bytes of APK must be ZIP/APK header "PK\x03\x04")
+    const rangeRes = await fetch(`${baseUrl}/download/apk`, {
+      headers: { Range: 'bytes=0-3' }
+    });
+    assert.equal(rangeRes.status, 206);
+    assert.equal(rangeRes.headers.get('content-range'), `bytes 0-3/${info.sizeBytes}`);
+    const magic = new Uint8Array(await rangeRes.arrayBuffer());
+    assert.deepEqual(Array.from(magic), [0x50, 0x4b, 0x03, 0x04]);
+
+    // 4. Download landing page (/download and browser GET /)
+    const pageRes = await fetch(`${baseUrl}/download`);
+    assert.equal(pageRes.status, 200);
+    const html = await pageRes.text();
+    assert.ok(html.includes('/download/dinthi-ai.apk'));
+    assert.ok(html.includes(info.sha256));
+
+    const browserRootRes = await fetch(`${baseUrl}/`, {
+      headers: { Accept: 'text/html,application/xhtml+xml' }
+    });
+    assert.equal(browserRootRes.status, 200);
+    assert.match(browserRootRes.headers.get('content-type') || '', /text\/html/);
+    assert.ok((await browserRootRes.text()).includes('/download/dinthi-ai.apk'));
+
+    const apiRootRes = await fetch(`${baseUrl}/`, {
+      headers: { Accept: 'application/json' }
+    });
+    assert.equal(apiRootRes.status, 200);
+    assert.equal((await apiRootRes.json()).status, 'ok');
+  } finally {
+    server.close();
+  }
+});

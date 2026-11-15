@@ -28,3 +28,6 @@ server/.env.*
 *service-account*.json
 *firebase-adminsdk*.json
 debug.keystore
+*.apk
+*.aab
+server/downloads/

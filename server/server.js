@@ -114,7 +114,7 @@ function getCorsHeaders(req) {
   return {
     'Access-Control-Allow-Origin': normalized,
     'Vary': 'Origin',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, HEAD, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-App-Client-Token',
     'Access-Control-Max-Age': '86400'
   };
@@ -333,6 +333,218 @@ function validateWebhookRequest(req, rawBody, url, sessionId) {
   return signatureOk ? { valid: true } : { valid: false, reason: 'Invalid X-Twilio-Signature' };
 }
 
+let cachedApkHash = null;
+
+function getExternalApkDownloadUrl() {
+  const raw = String(process.env.APK_DOWNLOAD_URL || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'https:' || (process.env.NODE_ENV !== 'production' && parsed.protocol === 'http:')) {
+      return parsed.toString();
+    }
+    return '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+function resolveApkSource() {
+  const explicitPath = String(process.env.APK_FILE_PATH || '').trim();
+  const candidates = [
+    explicitPath ? path.resolve(explicitPath) : '',
+    path.join(__dirname, 'downloads', 'Dinthi-AI.apk'),
+    path.resolve(__dirname, '../app/build/outputs/apk/debug/app-debug.apk'),
+    path.resolve(__dirname, '../.build-outputs/app-debug.apk')
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile() && stat.size > 0) {
+        return { filePath: candidate, sizeBytes: stat.size, mtimeMs: stat.mtimeMs };
+      }
+    } catch (_e) {
+      // Check next candidate
+    }
+  }
+  return null;
+}
+
+function getApkSha256(apkInfo) {
+  if (!apkInfo) return null;
+  if (
+    cachedApkHash &&
+    cachedApkHash.filePath === apkInfo.filePath &&
+    cachedApkHash.sizeBytes === apkInfo.sizeBytes &&
+    cachedApkHash.mtimeMs === apkInfo.mtimeMs
+  ) {
+    return cachedApkHash.sha256;
+  }
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(apkInfo.filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    let bytesRead = 0;
+    while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, bytesRead));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  const sha256 = hash.digest('hex');
+  cachedApkHash = { ...apkInfo, sha256 };
+  return sha256;
+}
+
+function streamApkDownload(req, res) {
+  const apkInfo = resolveApkSource();
+  const corsHeaders = getCorsHeaders(req);
+  const resolvedCors = corsHeaders === null ? {} : corsHeaders;
+
+  if (!apkInfo) {
+    const externalUrl = getExternalApkDownloadUrl();
+    if (externalUrl) {
+      res.writeHead(302, {
+        Location: externalUrl,
+        ...getSecurityHeaders(),
+        ...resolvedCors
+      });
+      res.end();
+      return;
+    }
+    sendJson(req, res, 404, { error: 'APK file is not available on this server yet.' });
+    return;
+  }
+
+  const totalSize = apkInfo.sizeBytes;
+  const baseHeaders = {
+    'Content-Type': 'application/vnd.android.package-archive',
+    'Content-Disposition': 'attachment; filename="Dinthi-AI.apk"',
+    'Accept-Ranges': 'bytes',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'public, max-age=300',
+    ...resolvedCors
+  };
+
+  const rangeHeader = req.headers.range;
+  if (rangeHeader && /^bytes=\d*-\d*$/i.test(rangeHeader.trim())) {
+    const [rawStart, rawEnd] = rangeHeader.trim().replace(/^bytes=/i, '').split('-');
+    let start = rawStart === '' ? 0 : parseInt(rawStart, 10);
+    let end = rawEnd === '' ? totalSize - 1 : parseInt(rawEnd, 10);
+
+    if (rawStart === '' && rawEnd !== '') {
+      const suffixLength = parseInt(rawEnd, 10);
+      start = Math.max(0, totalSize - suffixLength);
+      end = totalSize - 1;
+    }
+
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end >= totalSize || start > end) {
+      res.writeHead(416, {
+        'Content-Range': `bytes */${totalSize}`,
+        ...getSecurityHeaders(),
+        ...resolvedCors
+      });
+      res.end();
+      return;
+    }
+
+    const chunkSize = end - start + 1;
+    res.writeHead(206, {
+      ...baseHeaders,
+      'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+      'Content-Length': String(chunkSize)
+    });
+
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+
+    const stream = fs.createReadStream(apkInfo.filePath, { start, end });
+    stream.on('error', err => {
+      console.error('APK range stream error:', err.message);
+      if (!res.headersSent) {
+        sendJson(req, res, 500, { error: 'Failed to stream APK file' });
+      } else if (!res.writableEnded) {
+        res.destroy();
+      }
+    });
+    stream.pipe(res);
+    return;
+  }
+
+  res.writeHead(200, {
+    ...baseHeaders,
+    'Content-Length': String(totalSize)
+  });
+
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+
+  const stream = fs.createReadStream(apkInfo.filePath);
+  stream.on('error', err => {
+    console.error('APK stream error:', err.message);
+    if (!res.headersSent) {
+      sendJson(req, res, 500, { error: 'Failed to stream APK file' });
+    } else if (!res.writableEnded) {
+      res.destroy();
+    }
+  });
+  stream.pipe(res);
+}
+
+function sendApkDownloadPage(req, res) {
+  const apkInfo = resolveApkSource();
+  const externalUrl = getExternalApkDownloadUrl();
+  const sizeMb = apkInfo ? (apkInfo.sizeBytes / (1024 * 1024)).toFixed(2) : null;
+  const sha256 = apkInfo ? getApkSha256(apkInfo) : null;
+  const directHref = apkInfo ? '/download/dinthi-ai.apk' : externalUrl;
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Download Dinthi AI APK</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0B1020; color: #F1F5F9; margin: 0; display: grid; place-items: center; min-height: 100vh; padding: 24px; }
+    .card { max-width: 460px; width: 100%; background: #141B2D; border: 1px solid #26324D; border-radius: 20px; padding: 28px; box-sizing: border-box; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    p { color: #94A3B8; line-height: 1.5; margin: 0 0 20px; }
+    .btn { display: block; text-align: center; background: #00E5FF; color: #06101F; font-weight: 700; text-decoration: none; padding: 14px 18px; border-radius: 12px; }
+    .meta { margin-top: 18px; font-size: 13px; color: #CBD5E1; word-break: break-all; }
+    .meta code { color: #38BDF8; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Dinthi AI for Android</h1>
+    <p>Direct APK package download from the Dinthi AI server.</p>
+    ${directHref
+      ? `<a class="btn" href="${directHref}" download="Dinthi-AI.apk">Download Dinthi-AI.apk${sizeMb ? ` (${sizeMb} MB)` : ''}</a>`
+      : `<p>APK download is currently unavailable. Build the APK or set <code>APK_DOWNLOAD_URL</code> on the server.</p>`}
+    ${sha256 ? `<div class="meta">SHA-256:<br /><code>${sha256}</code></div>` : ''}
+  </main>
+</body>
+</html>`;
+
+  res.writeHead(apkInfo || externalUrl ? 200 : 404, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Cache-Control': 'no-store'
+  });
+  if (req.method === 'HEAD') {
+    res.end();
+    return;
+  }
+  res.end(html);
+}
+
 function createAppServer() {
   const server = http.createServer(async (req, res) => {
     try {
@@ -366,6 +578,13 @@ function createAppServer() {
         'unknown';
       const geminiApiKey = getGeminiApiKey();
 
+      // Browser root opens one-tap APK download page; health checks / API clients receive JSON
+      const acceptsHtml = String(req.headers.accept || '').toLowerCase().includes('text/html');
+      if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/' && acceptsHtml) {
+        sendApkDownloadPage(req, res);
+        return;
+      }
+
       // Health check endpoint (public, no auth required)
       if (req.method === 'GET' && (url.pathname === '/health' || url.pathname === '/')) {
         const telephonyConfig = telephony.getTelephonyConfig();
@@ -389,6 +608,53 @@ function createAppServer() {
         corsHeaders === null
       ) {
         sendJson(req, res, 403, { error: 'Origin not allowed by CORS policy' });
+        return;
+      }
+
+      // Direct APK Download Metadata Endpoint (public, CORS enabled for GitHub Pages frontend)
+      if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/api/app/apk-info') {
+        const apkInfo = resolveApkSource();
+        const externalUrl = getExternalApkDownloadUrl();
+        const baseUrl = resolveWebhookBaseUrl(req);
+        const downloadPath = '/download/dinthi-ai.apk';
+        const payload = {
+          available: Boolean(apkInfo || externalUrl),
+          filename: 'Dinthi-AI.apk',
+          mimeType: 'application/vnd.android.package-archive',
+          sizeBytes: apkInfo ? apkInfo.sizeBytes : null,
+          sha256: apkInfo ? getApkSha256(apkInfo) : null,
+          downloadPath,
+          downloadUrl: baseUrl ? `${baseUrl}${downloadPath}` : (externalUrl || downloadPath),
+          externalRedirectUrl: externalUrl || null
+        };
+        if (req.method === 'HEAD') {
+          const resolvedCors = corsHeaders === null ? {} : corsHeaders;
+          res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            ...getSecurityHeaders(),
+            ...resolvedCors
+          });
+          res.end();
+          return;
+        }
+        sendJson(req, res, 200, payload);
+        return;
+      }
+
+      // Direct APK File Download Endpoints
+      if (
+        (req.method === 'GET' || req.method === 'HEAD') &&
+        (url.pathname === '/download/apk' ||
+          url.pathname === '/download/dinthi-ai.apk' ||
+          url.pathname === '/dinthi-ai.apk')
+      ) {
+        streamApkDownload(req, res);
+        return;
+      }
+
+      // APK Download Landing Page
+      if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/download') {
+        sendApkDownloadPage(req, res);
         return;
       }
 
@@ -1239,15 +1505,44 @@ function startServer(port = getPort()) {
     console.error('Unhandled Rejection in Dinthi AI server:', reason?.message || reason);
   });
 
-  server.listen(port, '0.0.0.0', () => {
+  const logStartupBanner = activePort => {
     const config = telephony.getTelephonyConfig();
-    console.log(`Dinthi AI Secure Server running on port ${port}`);
+    console.log(`Dinthi AI Secure Server running on port ${activePort}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`Gemini API Key configured: ${getGeminiApiKey() ? 'YES (Server-side Only)' : 'NO'}`);
     console.log(`Telephony provider status: ${config.statusLabel} (${config.provider})`);
     console.log(`Public webhook URL configured: ${config.publicWebhookConfigured ? 'YES' : 'NO'}`);
     console.log(`Allowed CORS origins: ${Array.from(getAllowedOrigins()).join(', ')}`);
+  };
+
+  let activePort = port;
+  const fallbackAppPort = parseInt(process.env.APP_PORT || process.env.SERVER_PORT || '', 10);
+  let attemptedFallback = false;
+
+  server.on('error', err => {
+    if (
+      err &&
+      err.code === 'EADDRINUSE' &&
+      !attemptedFallback &&
+      Number.isInteger(fallbackAppPort) &&
+      fallbackAppPort > 0 &&
+      fallbackAppPort !== activePort
+    ) {
+      attemptedFallback = true;
+      console.warn(`Port ${activePort} is already in use; binding to fallback APP_PORT ${fallbackAppPort}...`);
+      activePort = fallbackAppPort;
+      server.listen(activePort, '0.0.0.0');
+      return;
+    }
+    console.error('Failed to start Dinthi AI server:', err?.message || err);
+    process.exit(1);
   });
+
+  server.on('listening', () => {
+    logStartupBanner(activePort);
+  });
+
+  server.listen(activePort, '0.0.0.0');
 
   return server;
 }
@@ -1264,5 +1559,6 @@ module.exports = {
   getAllowedOrigins,
   isOriginAllowed,
   validatePhoneNumber,
-  resolveWebhookBaseUrl
+  resolveWebhookBaseUrl,
+  resolveApkSource
 };

@@ -94,8 +94,17 @@ Set these variables in your Node.js hosting provider's environment settings (**n
 
 ## Webhook URLs & Endpoints
 
-### Public Health Check
+### Public Health & Direct APK Download Endpoints
 - `GET /health`
+- `GET /download` — One-tap mobile HTML download page with SHA-256 verification
+- `GET /download/dinthi-ai.apk` (also `/download/apk` and `/dinthi-ai.apk`) — Direct binary `.apk` stream (`application/vnd.android.package-archive`, HTTP `Range` resume supported) served from Gradle output (`app/build/outputs/apk/debug/app-debug.apk` / `.build-outputs/app-debug.apk`) or `APK_DOWNLOAD_URL`
+- `GET /api/app/apk-info` — JSON metadata (`filename`, `sizeBytes`, `sha256`, `downloadUrl`) with GitHub Pages CORS enabled
+
+To rebuild the local APK served by `server/`:
+```bash
+gradle :app:assembleDebug
+```
+Pushing to `main` also triggers `.github/workflows/build-apk.yml` to build `Dinthi-AI.apk` and publish a GitHub Release asset for direct download (you can set `APK_DOWNLOAD_URL=https://github.com/<owner>/<repo>/releases/latest/download/Dinthi-AI.apk` on standalone Node.js hosts).
 
 ### Telephony Session Endpoints (`/api/telephony/*`, Authenticated)
 - `GET /api/telephony/status`

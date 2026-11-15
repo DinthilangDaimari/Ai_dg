@@ -1,0 +1,54 @@
+name: Build & Publish Dinthi AI APK
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug
+
+      - name: Prepare Dinthi-AI.apk asset
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Dinthi-AI.apk
+
+      - name: Upload APK Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dinthi-AI-apk
+          path: dist/Dinthi-AI.apk
+
+      - name: Publish Direct Download Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Dinthi AI Android APK (Latest)
+          files: dist/Dinthi-AI.apk
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
