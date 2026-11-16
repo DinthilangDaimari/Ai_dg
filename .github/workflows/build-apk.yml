@@ -4,12 +4,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'app/**'
-      - 'gradle/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - '.github/workflows/build-apk.yml'
+      - master
   workflow_dispatch:
 
 permissions:
@@ -29,8 +24,18 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Restore Debug Keystore
+        run: |
+          if [ -f debug.keystore.base64 ]; then
+            tr -d '\r\n' < debug.keystore.base64 | base64 -d > debug.keystore
+          else
+            keytool -genkeypair -v -keystore debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
       - name: Build Debug APK
-        run: gradle :app:assembleDebug
+        run: gradle :app:assembleDebug --no-daemon
 
       - name: Prepare Dinthi-AI.apk asset
         run: |
@@ -50,5 +55,6 @@ jobs:
           name: Dinthi AI Android APK (Latest)
           files: dist/Dinthi-AI.apk
           prerelease: false
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

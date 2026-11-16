@@ -386,6 +386,18 @@ test('Direct APK download endpoints serve Dinthi-AI.apk with proper headers, Ran
     });
     assert.equal(apiRootRes.status, 200);
     assert.equal((await apiRootRes.json()).status, 'ok');
+
+    // 5. Case-insensitive and trailing-slash aliases do not return 404
+    for (const aliasPath of ['/Dinthi-AI.apk', '/download/Dinthi-AI.apk', '/app-debug.apk', '/download/apk']) {
+      const aliasRes = await fetch(`${baseUrl}${aliasPath}`, { method: 'HEAD' });
+      assert.equal(aliasRes.status, 200, `Expected 200 for ${aliasPath}`);
+      assert.equal(aliasRes.headers.get('content-type'), 'application/vnd.android.package-archive');
+    }
+
+    for (const pageAlias of ['/download/', '/downloads', '/apk']) {
+      const aliasPage = await fetch(`${baseUrl}${pageAlias}`, { method: 'HEAD' });
+      assert.equal(aliasPage.status, 200, `Expected 200 for ${pageAlias}`);
+    }
   } finally {
     server.close();
   }
